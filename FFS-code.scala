@@ -20,7 +20,8 @@ val selector = new UnivariateFeatureSelector()
     .setLabelType("continuous")
     .setSelectionMode("numTopFeatures")
     .setSelectionThreshold(1)
-    .setLabelCol("features")
+    .setFeaturesCol("features")
+    .setLabelCol("ArrDelay")
     .setOutputCol("selectedFeatures")
 
 val selectedFeatures = selector
