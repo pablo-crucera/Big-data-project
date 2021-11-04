@@ -1,5 +1,5 @@
 import spark.implicits._
-import org.apache.spark.ml.feature.{UnivariateFeatureSelector,VectorAssembler}
+import org.apache.spark.ml.feature.{UnivariateFeatureSelector, VectorAssembler}
 import org.apache.spark.ml.linalg.Vectors
 
 
@@ -9,7 +9,7 @@ val df = spark.read.format("csv").option("header", "true").load("/home/julia/Esc
 
 // Join all features in a single column in order to perform Univariate Filter FFS
 val assembler = new VectorAssembler()
-    .setInputCols(Array("Year","Month","DayofMonth","DayOfWeek","DepTime","CRSDepTime","CRSArrTime","UniqueCarrier","FlightNum","CRSElapsedTime","DepDelay","Origin","Dest","Distance","TaxiOut"))
+    .setInputCols(Array("Year", "Month", "DayofMonth", "DayOfWeek", "DepTime", "CRSDepTime", "CRSArrTime", "UniqueCarrier", "FlightNum", "CRSElapsedTime", "DepDelay", "Origin", "Dest", "Distance", "TaxiOut"))
     .setOutputCol("features")
 
 val assembledDF = assembler.transform(df)
@@ -23,7 +23,10 @@ val selector = new UnivariateFeatureSelector()
     .setLabelCol("features")
     .setOutputCol("selectedFeatures")
 
-val selectedFeatures = selector.fit(assembledDF).transform(assembledDF).select("selectedFeatures")
+val selectedFeatures = selector
+    .fit(assembledDF)
+    .transform(assembledDF)
+    .select("selectedFeatures")
 
 // Show results
 selectedFeatures.show()
