@@ -1,6 +1,3 @@
-//spark-submit --master local --class upm.bd.MyApp target/scala-2.12/sparkapp_2.12-1.0.0.jar  posar aixo al directori app
-
-
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types._
@@ -12,10 +9,13 @@ import org.apache.spark.sql._
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.regression.LinearRegression
 import org.apache.spark.mllib.evaluation.RegressionMetrics
+import javax.swing.JFileChooser
+import javax.swing.filechooser.FileNameExtensionFilter
+import java.io.File
 
 
 
-object MyApp{
+object MyApp {
   def main(args: Array[String]) {
     val spark = SparkSession.builder().getOrCreate()
 
@@ -58,9 +58,20 @@ object MyApp{
     val parseTime = udf((s: Int) => s % 100 + (s / 100) * 60)
 
 
-    // Load data, drop unuseful variables and rows with a null value for the target variable and transform time variables
-    val filePath = "/home/javier/Documents/master/bddv/data/2002.csv"
-    val df = spark.read.option("header", "true").schema(schema).csv(filePath).drop("ArrTime", "ActualElapsedTime", "AirTime", "TaxiIn", "Diverted", "CarrierDelay", "WeatherDelay", "NASDelay", "SecurityDelay", "LateAircraftDelay", "Cancelled", "CancellationCode", "TailNum").filter(col("ArrDelay").isNotNull).withColumn("DepTime",parseTime($"DepTime")).withColumn("CRSDepTime",parseTime($"CRSDepTime")).withColumn("CRSArrTime",parseTime($"CRSArrTime"))
+    // Load csv files selected by the user, drop unuseful variables and rows with a null value for the target variable and transform time variables
+    var filePaths =  Array.empty[File]
+    var chooser = new JFileChooser();
+    val extension_filter = new FileNameExtensionFilter("CSV files", "csv"); // Show only csv files
+    chooser.setCurrentDirectory(new java.io.File("."));
+    chooser.setDialogTitle("Select CSV files");
+    chooser.setFileFilter(extension_filter);
+    chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
+    while(filePaths.isEmpty) {
+      if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION){
+        filePaths = chooser.getSelectedFiles();
+      }
+    }
+    val df = spark.read.option("header", "true").schema(schema).csv(filePaths.map(_.getAbsolutePath): _*).drop("ArrTime", "ActualElapsedTime", "AirTime", "TaxiIn", "Diverted", "CarrierDelay", "WeatherDelay", "NASDelay", "SecurityDelay", "LateAircraftDelay", "Cancelled", "CancellationCode", "TailNum").filter(col("ArrDelay").isNotNull).withColumn("DepTime",parseTime($"DepTime")).withColumn("CRSDepTime",parseTime($"CRSDepTime")).withColumn("CRSArrTime",parseTime($"CRSArrTime"))
 
     // Check null values of each variable
     for (c <- df.columns){printf("Column %s: %d null values\n", c, df.filter(col(c).isNull || col(c) === "NA").count())}
