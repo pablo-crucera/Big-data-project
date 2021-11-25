@@ -154,6 +154,8 @@ object MyApp {
       .setOutputCol("pca-features")
       .setK(K).fit(training)
       .transform(training)
+    val PCAdftest = new PCA().setInputCol("scaledFeatures").setOutputCol("pca-features").setK(K).fit(test).transform(test)
+
     // PCAdf.select(col("pca-features")).show()
     val mahalanobis: DataFrame = withMahalanobis(PCAdf, "pca-features", K)
     mahalanobis.select(col("mahalanobis")).show()
@@ -169,6 +171,8 @@ object MyApp {
     //val rowmatrix = RowMatrix(rdd)
 
     // MACHINE LEARNING MODELS
+    
+    ////////////////////////////////////////////Without specific FSS////////////////////////////////////////////////////////////////
     val lr = new LinearRegression()
       .setFeaturesCol("scaledFeatures")
       .setLabelCol("ArrDelay")
@@ -203,7 +207,28 @@ object MyApp {
     val Rsquare33 = new RegressionMetrics(predictions33.zip(labels33)).r2
     output.println(s"Root mean squared error (RMSE) for GLR: $RMSE33")
     output.println(s"R-square for GLR: $Rsquare33")
+    
+    
+    //////////////////////////////////////////////////PCA/////////////////////////////////////////////////////////////
+    val lr2 = new LinearRegression()
+      .setFeaturesCol("pca-features")
+      .setLabelCol("ArrDelay")
+      .setMaxIter(10)
+      .setElasticNetParam(0.8)
+
+    val pipeline22 = new Pipeline().setStages(Array(lr2))
+  
+    val lrModel2 = pipeline22.fit(PCAdf).transform(PCAdftest)
+
+    val predictions2 = lrModel2.select("prediction").rdd.map(_.getDouble(0))
+    val labels2 = lrModel2.select("ArrDelay").rdd.map(_.getDouble(0))
+    val RMSE2 = new RegressionMetrics(predictions2.zip(labels2)).rootMeanSquaredError
+    val Rsquare2 = new RegressionMetrics(predictions2.zip(labels2)).r2
+    output.println(s"Root mean squared error (RMSE) for linear regression and PCA: $RMSE2")
+    output.println(s"R-square for linear regression and PCA: $Rsquare2")    
     output.close()
+    
+    ///////////////////////////////////////////////Univariate filter??//////////////////////////////////////
 
   }
 }
