@@ -13,7 +13,7 @@ import org.apache.spark.ml.regression.LinearRegression
 import org.apache.spark.mllib.evaluation.RegressionMetrics
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
-import java.io.File
+import java.io.{File, PrintWriter}
 
 
 object MyApp {
@@ -72,6 +72,8 @@ object MyApp {
     // Transform variables with format hhmm to minutes after 00:00
     val parseTime = udf((s: Int) => s % 100 + (s / 100) * 60)
 
+    val outFile = new File("output.txt")
+    val output = new PrintWriter(outFile)
 
     // Load csv files selected by the user, drop unuseful variables and rows with a null value for the target variable and transform time variables
     var filePaths = Array.empty[File]
@@ -97,7 +99,7 @@ object MyApp {
 
     // Check null values of each variable
     for (c <- df.columns) {
-      printf("Column %s: %d null values\n", c, df.filter(col(c).isNull || col(c) === "NA").count())
+      output.printf("Column %s: %s null values\n", c, df.filter(col(c).isNull || col(c) === "NA").count().toString)
     }
 
     // Transform categorical variables
@@ -137,6 +139,9 @@ object MyApp {
 
     // Show results
     dfTransformed.show()
+
+    val coeff1 = Correlation.corr(dfTransformed, "scaledFeatures")
+    output.println(s"Pearson correlation matrix:\n $coeff1")
 
     // Divide data into training and testing for transformed dataframe 1
     val split = dfTransformed.randomSplit(Array(0.7, 0.3))
@@ -179,8 +184,8 @@ object MyApp {
     val labels = lrModel.select("ArrDelay").rdd.map(_.getDouble(0))
     val RMSE = new RegressionMetrics(predictions.zip(labels)).rootMeanSquaredError
     val Rsquare = new RegressionMetrics(predictions.zip(labels)).r2
-    println(s"Root mean squared error (RMSE) for linear regression: $RMSE")
-    println(s"R-square for linear regression: $Rsquare")
+    output.println(s"Root mean squared error (RMSE) for linear regression: $RMSE")
+    output.println(s"R-square for linear regression: $Rsquare")
 
     val glr = new GeneralizedLinearRegression()
       .setFamily("poisson")
@@ -196,9 +201,9 @@ object MyApp {
     val labels33 = glrModel.select("ArrDelay").rdd.map(_.getDouble(0))
     val RMSE33 = new RegressionMetrics(predictions33.zip(labels33)).rootMeanSquaredError
     val Rsquare33 = new RegressionMetrics(predictions33.zip(labels33)).r2
-    println(s"  Root mean squared error (RMSE) for GLR: $RMSE33")
-    println(s"  R-square for GLR: $Rsquare33")
-
+    output.println(s"Root mean squared error (RMSE) for GLR: $RMSE33")
+    output.println(s"R-square for GLR: $Rsquare33")
+    output.close()
 
   }
 }
