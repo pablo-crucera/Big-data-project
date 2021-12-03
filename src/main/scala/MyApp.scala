@@ -1,28 +1,76 @@
 import org.apache.spark.sql.SparkSession
 import breeze.linalg.{DenseVector, inv}
 import org.apache.spark.ml.linalg.{Matrix, Vector}
-import org.apache.spark.ml.regression.GeneralizedLinearRegression
 import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types._
-import org.apache.spark.ml.feature.{StringIndexer, StandardScaler, VectorAssembler, UnivariateFeatureSelector, PCA}
+import org.apache.spark.ml.feature.{PCA, StandardScaler, StringIndexer, VectorAssembler}
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.sql.Row
 import org.apache.spark.ml.stat._
 import org.apache.spark.sql._
-import org.apache.spark.ml.regression.LinearRegression
+import org.apache.spark.ml.regression._
 import org.apache.spark.mllib.evaluation.RegressionMetrics
-import javax.swing.JFileChooser
+import org.apache.spark.sql.expressions.UserDefinedFunction
 import javax.swing.filechooser.FileNameExtensionFilter
 import java.io.{File, PrintWriter}
+import javax.swing.JFileChooser
+import scala.annotation.tailrec
 
 
-object MyApp {
-  // Outlier detection
-  def withMahalanobis(df: DataFrame, inputCol: String, k: Int): DataFrame = {
+class SparkPredictor {
+  val spark: SparkSession = SparkSession.builder().getOrCreate()
+  import spark.implicits._
+
+  // Transform variables with format hhmm to minutes after 00:00
+  val parseTime: UserDefinedFunction = udf((s: Int) => s % 100 + (s / 100) * 60)
+  var checking = false
+  var trainFiles = Array.empty[File]
+  var testFiles = Array.empty[File]
+  var testPercentage = 0.0
+  val outFile = new File("output.txt")
+  val output = new PrintWriter(outFile)
+
+  val schema: StructType = StructType(Array(
+    StructField("Year", IntegerType, nullable = true),
+    StructField("Month", IntegerType, nullable = true),
+    StructField("DayofMonth", IntegerType, nullable = true),
+    StructField("DayOfWeek", IntegerType, nullable = true),
+    StructField("DepTime", IntegerType, nullable = true),
+    StructField("CRSDepTime", IntegerType, nullable = true),
+    StructField("ArrTime", StringType, nullable = true),
+    StructField("CRSArrTime", IntegerType, nullable = true),
+    StructField("UniqueCarrier", StringType, nullable = true),
+    StructField("FlightNum", IntegerType, nullable = true),
+    StructField("TailNum", IntegerType, nullable = true),
+    StructField("ActualElapsedTime", StringType, nullable = true),
+    StructField("CRSElapsedTime", IntegerType, nullable = true),
+    StructField("AirTime", StringType, nullable = true),
+    StructField("ArrDelay", DoubleType, nullable = true),
+    StructField("DepDelay", IntegerType, nullable = true),
+    StructField("Origin", StringType, nullable = true),
+    StructField("Dest", StringType, nullable = true),
+    StructField("Distance", IntegerType, nullable = true),
+    StructField("TaxiIn", StringType, nullable = true),
+    StructField("TaxiOut", IntegerType, nullable = true),
+    StructField("Cancelled", IntegerType, nullable = true),
+    StructField("CancellationCode", StringType, nullable = true),
+    StructField("Diverted", StringType, nullable = true),
+    StructField("CarrierDelay", StringType, nullable = true),
+    StructField("WeatherDelay", StringType, nullable = true),
+    StructField("NASDelay", StringType, nullable = true),
+    StructField("SecurityDelay", StringType, nullable = true),
+    StructField("LateAircraftDelay", StringType, nullable = true)
+  ))
+
+  /**
+   * Adds to the DataFrame a  new column that represents de Mahalanobis distance to the mean of each row
+   * @param df a DataFrame
+   * @param inputCol name of the column where the features are stored
+   * @param k number of features stored in the column inputCol
+   * @return
+   */
+  def addMahalanobis(df: DataFrame, inputCol: String, k: Int): DataFrame = {
     val Row(coeff1: Matrix) = Correlation.corr(df, inputCol).head
-
     val invCovariance = inv(new breeze.linalg.DenseMatrix(k, k, coeff1.toArray))
-
     val mahalanobis = udf[Double, Vector] { v =>
       val vB = DenseVector(v.toArray)
       vB.t * invCovariance * vB
@@ -31,87 +79,79 @@ object MyApp {
     df.withColumn("mahalanobis", mahalanobis(df(inputCol)))
   }
 
-  def main(args: Array[String]): Unit = {
-    val spark = SparkSession.builder().getOrCreate()
+  def closeOutput(): Unit = {
+    output.close()
+  }
 
-    import spark.implicits._
+  /**
+   * @param testing a boolean to know if the files to load are for testing
+   * @param checking a boolean to know if the data to load is for previous checks
+   * @return a DataFrame obtained after reading and transforming the file
+   */
+  def loadData(testing: Boolean, checking: Boolean): DataFrame = {
+    var files = trainFiles
+    if (testing)
+      files = testFiles
 
-    // Set schema of the dataframe
-    val schema = StructType(Array(
-      StructField("Year", IntegerType, nullable = true),
-      StructField("Month", IntegerType, nullable = true),
-      StructField("DayofMonth", IntegerType, nullable = true),
-      StructField("DayOfWeek", IntegerType, nullable = true),
-      StructField("DepTime", IntegerType, nullable = true),
-      StructField("CRSDepTime", IntegerType, nullable = true),
-      StructField("ArrTime", StringType, nullable = true),
-      StructField("CRSArrTime", IntegerType, nullable = true),
-      StructField("UniqueCarrier", StringType, nullable = true),
-      StructField("FlightNum", IntegerType, nullable = true),
-      StructField("TailNum", IntegerType, nullable = true),
-      StructField("ActualElapsedTime", StringType, nullable = true),
-      StructField("CRSElapsedTime", IntegerType, nullable = true),
-      StructField("AirTime", StringType, nullable = true),
-      StructField("ArrDelay", DoubleType, nullable = true),
-      StructField("DepDelay", IntegerType, nullable = true),
-      StructField("Origin", StringType, nullable = true),
-      StructField("Dest", StringType, nullable = true),
-      StructField("Distance", IntegerType, nullable = true),
-      StructField("TaxiIn", StringType, nullable = true),
-      StructField("TaxiOut", IntegerType, nullable = true),
-      StructField("Cancelled", IntegerType, nullable = true),
-      StructField("CancellationCode", StringType, nullable = true),
-      StructField("Diverted", StringType, nullable = true),
-      StructField("CarrierDelay", StringType, nullable = true),
-      StructField("WeatherDelay", StringType, nullable = true),
-      StructField("NASDelay", StringType, nullable = true),
-      StructField("SecurityDelay", StringType, nullable = true),
-      StructField("LateAircraftDelay", StringType, nullable = true)
-    ))
-
-    // Transform variables with format hhmm to minutes after 00:00
-    val parseTime = udf((s: Int) => s % 100 + (s / 100) * 60)
-
-    val outFile = new File("output.txt")
-    val output = new PrintWriter(outFile)
-
-    // Load csv files selected by the user, drop unuseful variables and rows with a null value for the target variable and transform time variables
-    var filePaths = Array.empty[File]
-    val chooser = new JFileChooser()
-    val extension_filter = new FileNameExtensionFilter("CSV files", "csv"); // Show only csv files
-    chooser.setCurrentDirectory(new java.io.File("."))
-    chooser.setDialogTitle("Select CSV files")
-    chooser.setFileFilter(extension_filter)
-    chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
-    while (filePaths.isEmpty) {
-      if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-        filePaths = chooser.getSelectedFiles
-      }
-    }
     val df = spark.read.option("header", "true")
       .schema(schema)
-      .csv(filePaths.map(_.getAbsolutePath): _*)
-      .drop("ArrTime", "ActualElapsedTime", "AirTime", "TaxiIn", "Diverted", "CarrierDelay", "WeatherDelay", "NASDelay", "SecurityDelay", "LateAircraftDelay", "Cancelled", "CancellationCode", "TailNum")
+      .csv(files.map(_.getAbsolutePath): _*)
+      .drop("ArrTime", "ActualElapsedTime", "AirTime", "TaxiIn", "Diverted", "CarrierDelay", "WeatherDelay",
+        "NASDelay", "SecurityDelay", "LateAircraftDelay", "Cancelled", "CancellationCode", "TailNum")
       .withColumn("DepTime", parseTime($"DepTime"))
       .withColumn("CRSDepTime", parseTime($"CRSDepTime"))
       .withColumn("CRSArrTime", parseTime($"CRSArrTime"))
       .na.drop()
 
-    // Check null values of each variable
-    for (c <- df.columns) {
-      output.printf("Column %s: %s null values\n", c, df.filter(col(c).isNull || col(c) === "NA").count().toString)
-    }
+    if (checking)
+      return df
+    df.select("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay", "Month", "Year")
+  }
 
-    // Transform categorical variables
-    val indexer_city = new StringIndexer()
-      .setInputCols(Array("Origin", "Dest"))
-      .setOutputCols(Array("Origin_cat", "Dest_cat"))
-    val indexer_carrier = new StringIndexer()
-      .setInputCol("UniqueCarrier")
-      .setOutputCol("UniqueCarrier_cat")
+  /**
+   * Creates and applies a regression model with the training and testing DataFrames received
+   * @param regType type of regression
+   * @param dfTrain training DataFrame
+   * @param dfTest testing DataFrame
+   * @return a triple with root mean squared error, R square and adjusted R square
+   */
+  def regressionModel(regType: String, dfTrain: DataFrame, dfTest: DataFrame): (Double, Double, Double) = {
+    var pos = 0
+    val regTypes = Array(new LinearRegression()
+                            .setFeaturesCol("scaledFeatures")
+                            .setLabelCol("ArrDelay")
+                            .setMaxIter(10)
+                            .setElasticNetParam(0.8),
+                          new DecisionTreeRegressor()
+                            .setFeaturesCol("scaledFeatures")
+                            .setLabelCol("ArrDelay"))
+    if(regType == "decision tree")
+      pos = 1
 
+    val pipeline = new Pipeline().setStages(Array(regTypes(pos)))
+    val model = pipeline.fit(dfTrain).transform(dfTest)
+    val predictions = model.select("prediction").rdd.map(_.getDouble(0))
+    val labels = model.select("ArrDelay").rdd.map(_.getDouble(0))
+    val RMSE = new RegressionMetrics(predictions.zip(labels)).rootMeanSquaredError
+    val Rsquare = new RegressionMetrics(predictions.zip(labels)).r2
+    val n = dfTrain.count
+    model.select("ArrDelay", "prediction").show()
+    val k = 7
+    val Rsquare_adjusted = 1 - ((1 - Rsquare) * (n - 1)) / (n - k - 1)
+
+    (RMSE, Rsquare, Rsquare_adjusted)
+  }
+
+  /**
+   * Executes the predictor according to the values of the attributes
+   */
+  def run(): Unit = {
+    val df = loadData(false, checking)
     // Assemble features
-    val features_names = df.columns.toSet -- Set("ArrDelay", "UniqueCarrier", "Origin", "Dest") ++ Set("UniqueCarrier_cat", "Origin_cat", "Dest_cat")
+    var features_names = df.columns.toSet -- Set("ArrDelay")
+    if (checking)
+      features_names = df.columns.toSet ++ Set("Origin_cat", "Dest_cat", "UniqueCarrier_cat") --
+        Set("ArrDelay", "Origin", "Dest", "UniqueCarrier")
     val assembler = new VectorAssembler()
       .setInputCols(features_names.toArray)
       .setOutputCol("features")
@@ -122,113 +162,154 @@ object MyApp {
       .setOutputCol("scaledFeatures")
       .setWithStd(true).setWithMean(true)
 
-    // Perform the Univariate Filter FSS
-    val selector = new UnivariateFeatureSelector()
-      .setFeatureType("continuous")
-      .setLabelType("continuous")
-      .setSelectionMode("numTopFeatures")
-      .setSelectionThreshold(1)
-      .setFeaturesCol("scaledFeatures")
-      .setLabelCol("ArrDelay")
-      .setOutputCol("selectedFeatures")
+    var pipeline = new Pipeline()
+      .setStages(Array(assembler, scaler))
 
-    // Create a pipeline for the defined transformations and perform them
-    val pipeline = new Pipeline()
-      .setStages(Array(indexer_city, indexer_carrier, assembler, scaler))
-    val dfTransformed = pipeline.fit(df).transform(df)
+    if (checking) {
+      for (c <- df.columns)
+        output.printf("Column %s: %s null values\n", c, df.filter(col(c).isNull || col(c) === "NA").count().toString)
 
-    // Show results
-    dfTransformed.show()
+      val indexer_city = new StringIndexer()
+        .setInputCols(Array("Origin", "Dest"))
+        .setOutputCols(Array("Origin_cat", "Dest_cat"))
+      val indexer_carrier = new StringIndexer()
+        .setInputCol("UniqueCarrier")
+        .setOutputCol("UniqueCarrier_cat")
+      val assemblerArrDelay = new VectorAssembler()
+        .setInputCols((features_names ++ Set("ArrDelay")).toArray)
+        .setOutputCol("featuresCorr")
+      val scalerArrDelay = new StandardScaler()
+        .setInputCol("features")
+        .setOutputCol("scaledFeaturesCorr")
+        .setWithStd(true).setWithMean(true)
+      pipeline = new Pipeline()
+        .setStages(Array(indexer_city, indexer_carrier, assembler, scaler, assemblerArrDelay, scalerArrDelay))
+    }
 
-    val coeff1 = Correlation.corr(dfTransformed, "scaledFeatures")
-    output.println(s"Pearson correlation matrix:\n $coeff1")
+    val pipelineModel = pipeline.fit(df)
+    val dfScaled = pipelineModel.transform(df)
 
-    // Divide data into training and testing for transformed dataframe 1
-    val split = dfTransformed.randomSplit(Array(0.7, 0.3))
+    // Divide data into training and testing
+    val split = dfScaled.randomSplit(Array(1 - testPercentage, testPercentage))
     val training = split(0)
-    val test = split(1)
+    var dfTest = split(1)
 
+    testPercentage match {
+      case 0 =>
+        dfTest = pipelineModel.transform(loadData(true, checking))
+      case -1 => // Cross-validation
+      case _ =>
+    }
+
+    // Perform Principal Component Analysis and delete outliers from the trainig set
     val K = 3
-    val PCAdf = new PCA()
+    val dfPCA = new PCA()
       .setInputCol("scaledFeatures")
       .setOutputCol("pca-features")
       .setK(K).fit(training)
       .transform(training)
-    val PCAdftest = new PCA().setInputCol("scaledFeatures").setOutputCol("pca-features").setK(K).fit(test).transform(test)
 
-    // PCAdf.select(col("pca-features")).show()
-    val mahalanobis: DataFrame = withMahalanobis(PCAdf, "pca-features", K)
-    mahalanobis.select(col("mahalanobis")).show()
-    val quantiles = mahalanobis.stat.approxQuantile("mahalanobis", Array(0.25, 0.75), 0.0)
-    PCAdf.select(col("pca-features")).show()
+    val dfMahalanobis: DataFrame = addMahalanobis(dfPCA, "pca-features", K)
+    val quantiles = dfMahalanobis.stat.approxQuantile("mahalanobis", Array(0.25, 0.75), 0.0)
     val Q1 = quantiles(0)
     val Q3 = quantiles(1)
     val IQR = Q3 - Q1
     val upperRange = Q3 + 1.5 * IQR
-    val cleanTrainingDF = mahalanobis.filter($"mahalanobis" < upperRange)
+    val dfTraining = dfMahalanobis.filter($"mahalanobis" < upperRange)
 
-    //val rdd = cleanTrainingDF.select(col("scaledFeatures")).rdd.map(list)
-    //val rowmatrix = RowMatrix(rdd)
+    if (checking) {
+      val Row(coeff1: Matrix) = Correlation.corr(dfTraining, "scaledFeaturesCorr").head
+      output.println(s"Pearson correlation matrix:\n " + coeff1.toString(16, 100000))
+    }
 
-    // MACHINE LEARNING MODELS
-    
-    ////////////////////////////////////////////Without specific FSS////////////////////////////////////////////////////////////////
-    val lr = new LinearRegression()
-      .setFeaturesCol("scaledFeatures")
-      .setLabelCol("ArrDelay")
-      .setMaxIter(10)
-      .setElasticNetParam(0.8)
+    val regressors = Array("linear", "decision tree")
+    for (reg <- regressors) {
+      val (rmse, rSquare, rSquareAdj) = regressionModel(reg, dfTraining, dfTest)
+      output.println("Root mean squared error (RMSE) for" + reg + s" regression: $rmse")
+      output.println("R-square for " + reg + s" regression: $rSquare")
+      output.println("R-square adjusted for " + reg + s" regression: $rSquareAdj")
+    }
+    closeOutput()
+  }
+}
 
-    val pipeline11 = new Pipeline()
-      .setStages(Array(lr))
+object MyApp {
+  /** Checks if the file has the appropriate structure
+   * @param path path of the file to check
+   * @return true if the file is ok, false in other case
+   */
+  def checkFile(path: String): Boolean = {
+    true
+  }
 
-    val lrModel = pipeline11.fit(cleanTrainingDF).transform(test)
+  /**
+   * Shows a file chooser that allows the user to select multiple CSV files
+   * @param s a string that tells the user has to select
+   * @return the option chosen in the dialog and and array with the paths to the files selected
+   */
+  def selectFiles(s: String): (Int, Array[File]) = {
+    var filePaths = Array.empty[File]
+    val chooser = new JFileChooser()
+    val extension_filter = new FileNameExtensionFilter("CSV files", "csv") // Show only csv files
+    chooser.setCurrentDirectory(new java.io.File("."))
+    chooser.setDialogTitle("Select CSV files" + s)
+    chooser.setFileFilter(extension_filter)
+    chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
+    val option = chooser.showOpenDialog(null)
+    if (option == JFileChooser.APPROVE_OPTION)
+      filePaths = chooser.getSelectedFiles
+    (option, filePaths)
+  }
 
-    val predictions = lrModel.select("prediction").rdd.map(_.getDouble(0))
-    val labels = lrModel.select("ArrDelay").rdd.map(_.getDouble(0))
-    val RMSE = new RegressionMetrics(predictions.zip(labels)).rootMeanSquaredError
-    val Rsquare = new RegressionMetrics(predictions.zip(labels)).r2
-    output.println(s"Root mean squared error (RMSE) for linear regression: $RMSE")
-    output.println(s"R-square for linear regression: $Rsquare")
+  /**
+   * Parses the command line arguments
+   * @param args list of the command line arguments of the program
+   * @param check default value for check
+   * @param perc default value for perc
+   * @return a triple with the values for check, testing percentage and different files option
+   */
+  @tailrec
+  def parseArgs(args: List[String], check: Boolean, perc: Double): (Boolean, Double) = args match {
+    case Nil => (check, perc)
+    case "-t" :: num :: rest => parseArgs(rest, check, num.toDouble)
+    case "-c" :: rest => parseArgs(rest, true, perc)
+    case "-s" :: rest => parseArgs(rest, check, 0)
+    case "--cv" :: rest => parseArgs(rest, check, -1)
+  }
 
-    val glr = new GeneralizedLinearRegression()
-      .setFamily("poisson")
-      .setLink("log")
-      .setMaxIter(10)
-      .setRegParam(0.3)
-      .setLabelCol("ArrDelay")
-      .setFeaturesCol("scaledFeatures")
-    val pipeline33 = new Pipeline().setStages(Array(lr))
-    val glrModel = pipeline33.fit(training).transform(test)
+  def main(args: Array[String]): Unit = {
+    val usage =
+      """
+        |-t <value>   percentage used for testing
+        |-c           check other configurations
+        |-s           select different files for training and testing
+        |--cv         perform cross-validation
+        |""".stripMargin
+    val argsList = args.toList
+    val tupleArgs = parseArgs(argsList, false, 0.3)
 
-    val predictions33 = glrModel.select("prediction").rdd.map(_.getDouble(0))
-    val labels33 = glrModel.select("ArrDelay").rdd.map(_.getDouble(0))
-    val RMSE33 = new RegressionMetrics(predictions33.zip(labels33)).rootMeanSquaredError
-    val Rsquare33 = new RegressionMetrics(predictions33.zip(labels33)).r2
-    output.println(s"Root mean squared error (RMSE) for GLR: $RMSE33")
-    output.println(s"R-square for GLR: $Rsquare33")
-    
-    
-    //////////////////////////////////////////////////PCA/////////////////////////////////////////////////////////////
-    val lr2 = new LinearRegression()
-      .setFeaturesCol("pca-features")
-      .setLabelCol("ArrDelay")
-      .setMaxIter(10)
-      .setElasticNetParam(0.8)
+    val predictor = new SparkPredictor()
+    predictor.testPercentage = tupleArgs._2
+    predictor.checking = tupleArgs._1
 
-    val pipeline22 = new Pipeline().setStages(Array(lr2))
-  
-    val lrModel2 = pipeline22.fit(PCAdf).transform(PCAdftest)
+    var tuple1 = (JFileChooser.APPROVE_OPTION, Array.empty[File])
+    var tuple2 = (JFileChooser.APPROVE_OPTION, Array.empty[File])
 
-    val predictions2 = lrModel2.select("prediction").rdd.map(_.getDouble(0))
-    val labels2 = lrModel2.select("ArrDelay").rdd.map(_.getDouble(0))
-    val RMSE2 = new RegressionMetrics(predictions2.zip(labels2)).rootMeanSquaredError
-    val Rsquare2 = new RegressionMetrics(predictions2.zip(labels2)).r2
-    output.println(s"Root mean squared error (RMSE) for linear regression and PCA: $RMSE2")
-    output.println(s"R-square for linear regression and PCA: $Rsquare2")    
-    output.close()
-    
-    ///////////////////////////////////////////////Univariate filter??//////////////////////////////////////
+    while (tuple1._1 == JFileChooser.APPROVE_OPTION && tuple2._1 == JFileChooser.APPROVE_OPTION &&
+          (tuple1._2.isEmpty || (tuple2._2.isEmpty && predictor.testPercentage == 0))) {
+      if (predictor.testPercentage > 0)
+        tuple1 = selectFiles("")
+      else {
+        tuple1 = selectFiles("for training")
+        tuple2 = selectFiles("for testing")
+      }
+    }
 
+    if (tuple1._1 == JFileChooser.APPROVE_OPTION && tuple2._1 == JFileChooser.APPROVE_OPTION && !tuple1._2.isEmpty &&
+        (!tuple2._2.isEmpty || predictor.testPercentage != 0)) {
+      predictor.trainFiles = tuple1._2
+      predictor.testFiles = tuple2._2
+      predictor.run()
+    }
   }
 }
