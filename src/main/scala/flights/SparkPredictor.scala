@@ -1,34 +1,27 @@
-import org.apache.spark.sql.SparkSession
+package flights
+
 import breeze.linalg.{DenseVector, inv}
-import org.apache.spark.ml.linalg.{Matrix, Vector}
-import org.apache.spark.sql.functions.{col, udf}
-import org.apache.spark.sql.types._
-import org.apache.spark.ml.feature.{PCA, StandardScaler, StringIndexer, VectorAssembler}
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.stat._
-import org.apache.spark.sql._
-import org.apache.spark.ml.regression._
+import org.apache.spark.ml.feature.{PCA, StandardScaler, StringIndexer, VectorAssembler}
+import org.apache.spark.ml.linalg.{Matrix, Vector}
+import org.apache.spark.ml.regression.{DecisionTreeRegressor, LinearRegression}
+import org.apache.spark.ml.stat.Correlation
 import org.apache.spark.mllib.evaluation.RegressionMetrics
 import org.apache.spark.sql.expressions.UserDefinedFunction
-import javax.swing.filechooser.FileNameExtensionFilter
-import java.io.{File, PrintWriter}
-import javax.swing.JFileChooser
-import scala.annotation.tailrec
+import org.apache.spark.sql.functions.{col, udf}
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 
+import java.io.{File, PrintWriter}
 
 class SparkPredictor {
   val spark: SparkSession = SparkSession.builder().getOrCreate()
   import spark.implicits._
 
-  // Transform variables with format hhmm to minutes after 00:00
-  val parseTime: UserDefinedFunction = udf((s: Int) => s % 100 + (s / 100) * 60)
   var checking = false
   var trainFiles = Array.empty[File]
   var testFiles = Array.empty[File]
   var testPercentage = 0.0
-  val outFile = new File("output.txt")
-  val output = new PrintWriter(outFile)
-
   val schema: StructType = StructType(Array(
     StructField("Year", IntegerType, nullable = true),
     StructField("Month", IntegerType, nullable = true),
@@ -62,10 +55,11 @@ class SparkPredictor {
   ))
 
   /**
-   * Adds to the DataFrame a  new column that represents de Mahalanobis distance to the mean of each row
-   * @param df a DataFrame
+   * Adds to the DataFrame a  new column that represents the Mahalanobis distance to the mean of each row
+   *
+   * @param df       a DataFrame
    * @param inputCol name of the column where the features are stored
-   * @param k number of features stored in the column inputCol
+   * @param k        number of features stored in the column inputCol
    * @return
    */
   def addMahalanobis(df: DataFrame, inputCol: String, k: Int): DataFrame = {
@@ -79,12 +73,8 @@ class SparkPredictor {
     df.withColumn("mahalanobis", mahalanobis(df(inputCol)))
   }
 
-  def closeOutput(): Unit = {
-    output.close()
-  }
-
   /**
-   * @param testing a boolean to know if the files to load are for testing
+   * @param testing  a boolean to know if the files to load are for testing
    * @param checking a boolean to know if the data to load is for previous checks
    * @return a DataFrame obtained after reading and transforming the file
    */
@@ -93,6 +83,8 @@ class SparkPredictor {
     if (testing)
       files = testFiles
 
+    // Transform variables with format hhmm to minutes after 00:00
+    val parseTime: UserDefinedFunction = udf((s: Int) => s % 100 + (s / 100) * 60)
     val df = spark.read.option("header", "true")
       .schema(schema)
       .csv(files.map(_.getAbsolutePath): _*)
@@ -103,6 +95,9 @@ class SparkPredictor {
       .withColumn("CRSArrTime", parseTime($"CRSArrTime"))
       .na.drop()
 
+    df.show()
+    println(df.columns)
+
     if (checking)
       return df
     df.select("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay", "Month", "Year")
@@ -110,22 +105,23 @@ class SparkPredictor {
 
   /**
    * Creates and applies a regression model with the training and testing DataFrames received
+   *
    * @param regType type of regression
    * @param dfTrain training DataFrame
-   * @param dfTest testing DataFrame
+   * @param dfTest  testing DataFrame
    * @return a triple with root mean squared error, R square and adjusted R square
    */
   def regressionModel(regType: String, dfTrain: DataFrame, dfTest: DataFrame): (Double, Double, Double) = {
     var pos = 0
     val regTypes = Array(new LinearRegression()
-                            .setFeaturesCol("scaledFeatures")
-                            .setLabelCol("ArrDelay")
-                            .setMaxIter(10)
-                            .setElasticNetParam(0.8),
-                          new DecisionTreeRegressor()
-                            .setFeaturesCol("scaledFeatures")
-                            .setLabelCol("ArrDelay"))
-    if(regType == "decision tree")
+      .setFeaturesCol("scaledFeatures")
+      .setLabelCol("ArrDelay")
+      .setMaxIter(10)
+      .setElasticNetParam(0.8),
+      new DecisionTreeRegressor()
+        .setFeaturesCol("scaledFeatures")
+        .setLabelCol("ArrDelay"))
+    if (regType == "decision tree")
       pos = 1
 
     val pipeline = new Pipeline().setStages(Array(regTypes(pos)))
@@ -164,6 +160,9 @@ class SparkPredictor {
 
     var pipeline = new Pipeline()
       .setStages(Array(assembler, scaler))
+
+    val outFile = new File("output.txt")
+    val output = new PrintWriter(outFile)
 
     if (checking) {
       for (c <- df.columns)
@@ -229,87 +228,6 @@ class SparkPredictor {
       output.println("R-square for " + reg + s" regression: $rSquare")
       output.println("R-square adjusted for " + reg + s" regression: $rSquareAdj")
     }
-    closeOutput()
-  }
-}
-
-object MyApp {
-  /** Checks if the file has the appropriate structure
-   * @param path path of the file to check
-   * @return true if the file is ok, false in other case
-   */
-  def checkFile(path: String): Boolean = {
-    true
-  }
-
-  /**
-   * Shows a file chooser that allows the user to select multiple CSV files
-   * @param s a string that tells the user has to select
-   * @return the option chosen in the dialog and and array with the paths to the files selected
-   */
-  def selectFiles(s: String): (Int, Array[File]) = {
-    var filePaths = Array.empty[File]
-    val chooser = new JFileChooser()
-    val extension_filter = new FileNameExtensionFilter("CSV files", "csv") // Show only csv files
-    chooser.setCurrentDirectory(new java.io.File("."))
-    chooser.setDialogTitle("Select CSV files" + s)
-    chooser.setFileFilter(extension_filter)
-    chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
-    val option = chooser.showOpenDialog(null)
-    if (option == JFileChooser.APPROVE_OPTION)
-      filePaths = chooser.getSelectedFiles
-    (option, filePaths)
-  }
-
-  /**
-   * Parses the command line arguments
-   * @param args list of the command line arguments of the program
-   * @param check default value for check
-   * @param perc default value for perc
-   * @return a triple with the values for check, testing percentage and different files option
-   */
-  @tailrec
-  def parseArgs(args: List[String], check: Boolean, perc: Double): (Boolean, Double) = args match {
-    case Nil => (check, perc)
-    case "-t" :: num :: rest => parseArgs(rest, check, num.toDouble)
-    case "-c" :: rest => parseArgs(rest, true, perc)
-    case "-s" :: rest => parseArgs(rest, check, 0)
-    case "--cv" :: rest => parseArgs(rest, check, -1)
-  }
-
-  def main(args: Array[String]): Unit = {
-    val usage =
-      """
-        |-t <value>   percentage used for testing
-        |-c           check other configurations
-        |-s           select different files for training and testing
-        |--cv         perform cross-validation
-        |""".stripMargin
-    val argsList = args.toList
-    val tupleArgs = parseArgs(argsList, false, 0.3)
-
-    val predictor = new SparkPredictor()
-    predictor.testPercentage = tupleArgs._2
-    predictor.checking = tupleArgs._1
-
-    var tuple1 = (JFileChooser.APPROVE_OPTION, Array.empty[File])
-    var tuple2 = (JFileChooser.APPROVE_OPTION, Array.empty[File])
-
-    while (tuple1._1 == JFileChooser.APPROVE_OPTION && tuple2._1 == JFileChooser.APPROVE_OPTION &&
-          (tuple1._2.isEmpty || (tuple2._2.isEmpty && predictor.testPercentage == 0))) {
-      if (predictor.testPercentage > 0)
-        tuple1 = selectFiles("")
-      else {
-        tuple1 = selectFiles("for training")
-        tuple2 = selectFiles("for testing")
-      }
-    }
-
-    if (tuple1._1 == JFileChooser.APPROVE_OPTION && tuple2._1 == JFileChooser.APPROVE_OPTION && !tuple1._2.isEmpty &&
-        (!tuple2._2.isEmpty || predictor.testPercentage != 0)) {
-      predictor.trainFiles = tuple1._2
-      predictor.testFiles = tuple2._2
-      predictor.run()
-    }
+    output.close()
   }
 }
