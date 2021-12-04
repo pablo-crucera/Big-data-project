@@ -21,7 +21,7 @@ object FlightsDelayApp {
     chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
     val option = chooser.showOpenDialog(null)
     val selected = chooser.getSelectedFiles
-    if (option == JFileChooser.APPROVE_OPTION && selected.map(f => f.exists()).reduce(_&&_))
+    if (option == JFileChooser.APPROVE_OPTION && selected.map(f => f.exists()).reduce(_ && _))
       filePaths = selected
     (option == JFileChooser.APPROVE_OPTION, filePaths)
   }
@@ -47,6 +47,11 @@ object FlightsDelayApp {
     case _ => (false, check, perc)
   }
 
+  /**
+   * Shows error message and usage message
+   *
+   * @param args options introduced by the user
+   */
   def errorMessage(args: Array[String]): Unit = {
     val usage =
       """
@@ -61,14 +66,20 @@ object FlightsDelayApp {
     println(usage)
   }
 
+  /**
+   * Main method
+   *
+   * @param args options for the program
+   */
   def main(args: Array[String]): Unit = {
     if (args.length > 2) {
       errorMessage(args)
       sys.exit(1)
     }
+    // TODO: add cross-validation and/or hyper-parameter tuning
 
     val argsList = args.toList
-    val tupleArgs = parseArgs(argsList, false, 0.3)
+    val tupleArgs = parseArgs(argsList, check = false, 0.3)
 
     if (tupleArgs._1) {
       errorMessage(args)
