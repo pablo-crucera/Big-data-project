@@ -57,8 +57,7 @@ class SparkPredictor {
   val checkCols: Array[String] = Array("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay",
     "Month", "Year", "DayOfMonth", "DayOfWeek", "UniqueCarrier", "FlightNum",
     "CRSElapsedTime", "Origin", "Dest", "Distance")
-  val finalCols: Array[String] = Array("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay",
-    "Month", "Year")
+  val finalCols: Array[String] = Array("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay")
 
   /**
    * Adds to a DataFrame one column that represents the Mahalanobis distance to the mean for each row
@@ -83,10 +82,9 @@ class SparkPredictor {
    * Loads data from the corresponding files and performs some basic transformations
    *
    * @param testing  a boolean to know if the files to load are for testing
-   * @param checking a boolean to know if the data to load is for previous checks
    * @return a DataFrame obtained after reading and transforming the file
    */
-  def loadData(testing: Boolean, checking: Boolean): DataFrame = {
+  def loadData(testing: Boolean): DataFrame = {
     var files = trainFiles
     if (testing)
       files = testFiles
@@ -101,10 +99,9 @@ class SparkPredictor {
       .withColumn("CRSDepTime", parseTime($"CRSDepTime"))
       .withColumn("CRSArrTime", parseTime($"CRSArrTime"))
       .na.drop()
+      .filter($"Origin" =!= "NA" && $"Dest" =!= "NA" && $"UniqueCarrier" =!= "NA")
 
-    if (checking)
-      return df.filter($"Origin" =!= "NA" && $"Dest" =!= "NA" && $"UniqueCarrier" =!= "NA")
-    df.select(finalCols.map(s => col(s)): _*)
+    df
   }
 
   /**
@@ -116,13 +113,17 @@ class SparkPredictor {
    * @return a tuple with root mean squared error, R square, adjusted R square and a representation of 20 predictions
    */
   def regressionModel(regType: String, dfTrain: DataFrame, dfTest: DataFrame): (Double, Double, Double, String) = {
+    var inputCol = "scaledFeaturesCond"
+    if (checking)
+      inputCol = "scaledFeaturesAll"
+
     val regTypes = Map("linear" -> new LinearRegression()
-      .setFeaturesCol("scaledFeatures")
+      .setFeaturesCol(inputCol)
       .setLabelCol("ArrDelay")
       .setMaxIter(10)
       .setElasticNetParam(0.8),
       "decision tree" -> new DecisionTreeRegressor()
-        .setFeaturesCol("scaledFeatures")
+        .setFeaturesCol(inputCol)
         .setLabelCol("ArrDelay"))
 
     val pipeline = new Pipeline().setStages(Array(regTypes(regType)))
@@ -199,51 +200,51 @@ class SparkPredictor {
    * @return  a summary of the execution
    */
   def run(): String = {
-    val df = loadData(testing = false, checking = checking)
+    val df = loadData(testing = false)
 
     if(df.isEmpty)
       return "ERROR: files provided do not satisfy the required format"
 
-    var featuresNames = ArrayBuffer.empty[String]
-    if (checking)
-      featuresNames = checkCols.to[ArrayBuffer] -= "ArrDelay" -= "Origin" -= "Dest" -= "UniqueCarrier" +=
+    val allFeatures = checkCols.to[ArrayBuffer] -= "ArrDelay" -= "Origin" -= "Dest" -= "UniqueCarrier" +=
         "Origin_cat" += "Dest_cat" += "UniqueCarrier_cat"
-    else
-      featuresNames = finalCols.to[ArrayBuffer] -= "ArrDelay"
 
-    // Assemble features
-    val assembler = new VectorAssembler()
-      .setInputCols(featuresNames.toArray)
-      .setOutputCol("features")
+    // Conditional features are the features of the final model if we are not checking it with all features
+    // and all the features (including ArrDelay) otherwise
+    var conditionalFeatures = finalCols.to[ArrayBuffer] -= "ArrDelay"
+    if (checking)
+      conditionalFeatures = allFeatures += "ArrDelay"
 
-    // Scale features
-    val scaler = new StandardScaler()
-      .setInputCol("features")
-      .setOutputCol("scaledFeatures")
+    val indexerCity = new StringIndexer()
+      .setInputCols(Array("Origin", "Dest"))
+      .setOutputCols(Array("Origin_cat", "Dest_cat"))
+    val indexerCarrier = new StringIndexer()
+      .setInputCol("UniqueCarrier")
+      .setOutputCol("UniqueCarrier_cat")
+
+    // Assemble all features
+    val assemblerAll = new VectorAssembler()
+      .setInputCols(allFeatures.toArray)
+      .setOutputCol("featuresAll")
+
+    // Scale all features
+    val scalerAll = new StandardScaler()
+      .setInputCol("featuresAll")
+      .setOutputCol("scaledFeaturesAll")
       .setWithStd(true).setWithMean(true)
 
-    var pipeline = new Pipeline()
-      .setStages(Array(assembler, scaler))
+    // Assemble conditional features
+    val assemblerConditional = new VectorAssembler()
+      .setInputCols(conditionalFeatures.toArray)
+      .setOutputCol("featuresCond")
 
-    featuresNames += "ArrDelay"
-    // Add more information if we are checking the model with all the variables
-    if (checking) {
-      val indexerCity = new StringIndexer()
-        .setInputCols(Array("Origin", "Dest"))
-        .setOutputCols(Array("Origin_cat", "Dest_cat"))
-      val indexerCarrier = new StringIndexer()
-        .setInputCol("UniqueCarrier")
-        .setOutputCol("UniqueCarrier_cat")
-      val assemblerArrDelay = new VectorAssembler()
-        .setInputCols(featuresNames.toArray)
-        .setOutputCol("featuresCorr")
-      val scalerArrDelay = new StandardScaler()
-        .setInputCol("featuresCorr")
-        .setOutputCol("scaledFeaturesCorr")
-        .setWithStd(true).setWithMean(true)
-      pipeline = new Pipeline()
-        .setStages(Array(indexerCity, indexerCarrier, assembler, scaler, assemblerArrDelay, scalerArrDelay))
-    }
+    // Scale conditional features
+    val scalerConditional = new StandardScaler()
+      .setInputCol("featuresCond")
+      .setOutputCol("scaledFeaturesCond")
+      .setWithStd(true).setWithMean(true)
+
+    val pipeline = new Pipeline()
+      .setStages(Array(indexerCity, indexerCarrier, assemblerAll, scalerAll, assemblerConditional, scalerConditional))
 
     val pipelineModel = pipeline.fit(df)
     val dfScaled = pipelineModel.transform(df)
@@ -253,8 +254,9 @@ class SparkPredictor {
     val training = split(0)
     var dfTest = split(1)
 
+    // Do the same transformations to the testing data if we are getting it from different files
     if (testPercentage == 0)
-      dfTest = pipelineModel.transform(loadData(testing = true, checking = checking))
+      dfTest = pipelineModel.transform(loadData(testing = true))
 
     if (dfTest.isEmpty || training.isEmpty)
       return "ERROR: files provided do not satisfy the required format"
@@ -262,7 +264,7 @@ class SparkPredictor {
     // Perform Principal Component Analysis and delete outliers from the training set
     val k = 3
     val dfPCA = new PCA()
-      .setInputCol("scaledFeatures")
+      .setInputCol("scaledFeaturesAll")
       .setOutputCol("pca-features")
       .setK(k).fit(training)
       .transform(training)
@@ -276,6 +278,6 @@ class SparkPredictor {
     val resultsLinear = regressionModel("linear", dfTraining, dfTest)
     val resultsTree = regressionModel("decision tree", dfTraining, dfTest)
 
-    getSummary(resultsLinear, resultsTree, dfTraining, featuresNames)
+    getSummary(resultsLinear, resultsTree, dfTraining, conditionalFeatures)
   }
 }
