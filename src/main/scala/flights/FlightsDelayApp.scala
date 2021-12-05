@@ -14,10 +14,10 @@ object FlightsDelayApp {
   def selectFiles(s: String): (Boolean, Array[File]) = {
     var filePaths = Array.empty[File]
     val chooser = new JFileChooser()
-    val extension_filter = new FileNameExtensionFilter("CSV files", "csv") // Show only csv files
+    val extensionFilter = new FileNameExtensionFilter("CSV files", "csv") // Show only csv files
     chooser.setCurrentDirectory(new java.io.File("."))
     chooser.setDialogTitle("Select CSV files" + s)
-    chooser.setFileFilter(extension_filter)
+    chooser.setFileFilter(extensionFilter)
     chooser.setMultiSelectionEnabled(true); // Allow multiple files selection
     val option = chooser.showOpenDialog(null)
     val selected = chooser.getSelectedFiles
