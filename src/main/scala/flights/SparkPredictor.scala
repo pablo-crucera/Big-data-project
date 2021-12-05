@@ -8,10 +8,12 @@ import org.apache.spark.ml.regression.{DecisionTreeRegressor, LinearRegression}
 import org.apache.spark.ml.stat.Correlation
 import org.apache.spark.mllib.evaluation.RegressionMetrics
 import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.functions.udf
+import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+
 import java.io.{File, PrintWriter}
+import scala.collection.mutable.ArrayBuffer
 
 class SparkPredictor {
   // TODO: tune SparkConf
@@ -54,6 +56,13 @@ class SparkPredictor {
     StructField("SecurityDelay", StringType, nullable = true),
     StructField("LateAircraftDelay", StringType, nullable = true)
   ))
+  val outFile = new File("output.txt")
+  val output = new PrintWriter(outFile)
+  val columnsCheck: Array[String] = Array("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay",
+    "Month", "Year", "DayOfMonth", "DayOfWeek", "UniqueCarrier", "FlightNum",
+    "CRSElapsedTime", "Origin", "Dest", "Distance")
+  val columnsFinal: Array[String] = Array("CRSDepTime", "CRSArrTime", "DepTime",
+    "TaxiOut", "DepDelay", "ArrDelay", "Month", "Year")
 
   /**
    * Adds to a DataFrame one column that represents the Mahalanobis distance to the mean for each row
@@ -93,8 +102,7 @@ class SparkPredictor {
     val df = spark.read.option("header", "true")
       .schema(schema)
       .csv(files.map(_.getAbsolutePath): _*)
-      .drop("ArrTime", "ActualElapsedTime", "AirTime", "TaxiIn", "Diverted", "CarrierDelay", "WeatherDelay",
-        "NASDelay", "SecurityDelay", "LateAircraftDelay", "Cancelled", "CancellationCode", "TailNum")
+      .select(columnsCheck.map(s => col(s)): _*)
       .withColumn("DepTime", parseTime($"DepTime"))
       .withColumn("CRSDepTime", parseTime($"CRSDepTime"))
       .withColumn("CRSArrTime", parseTime($"CRSArrTime"))
@@ -102,7 +110,7 @@ class SparkPredictor {
 
     if (checking)
       return df
-    df.select("CRSDepTime", "CRSArrTime", "DepTime", "TaxiOut", "DepDelay", "ArrDelay", "Month", "Year")
+    df.select(columnsFinal.map(s => col(s)): _*)
 
     // TODO: transform times to the same time zone
     // TODO: create new variables, like number of flights that get to the same airport at the same time
@@ -143,16 +151,38 @@ class SparkPredictor {
   }
 
   /**
+   * Prints the correlation matrix
+   *
+   * @param df a DataFrame that must have a column named `scaledFeaturesCorr` used for calculating the matrix
+   * @param colsNames names of the columns assembled in `scaledFeaturesCorr`
+   */
+  def printCorrMatrix(df: DataFrame, colsNames: ArrayBuffer[String]): Unit = {
+    val Row(coeff: Matrix) = Correlation.corr(df, "scaledFeaturesCorr").head
+    val coeffArr = coeff.toArray.map(e => f"$e%.2f")
+    output.println(s"Pearson correlation matrix:")
+    output.println("Columns order: " + colsNames.mkString(", "))
+    for (i <- 0 until (coeffArr.length / coeff.numCols)) {
+      for (j <- 0 until coeff.numCols)
+        output.print(" " * (5 - coeffArr(i * coeff.numCols + j).length) + coeffArr(i * coeff.numCols + j) + " ")
+      output.println()
+    }
+  }
+
+  /**
    * Executes the predictor according to the values of the attributes
    */
   def run(): Unit = {
     // TODO: make a better use of pipelines
     val df = loadData(testing = false, checking = checking)
-    // Assemble features
-    var features_names = df.columns.toSet -- Set("ArrDelay")
+
+    var features_names = ArrayBuffer.empty[String]
     if (checking)
-      features_names = df.columns.toSet ++ Set("Origin_cat", "Dest_cat", "UniqueCarrier_cat") --
-        Set("ArrDelay", "Origin", "Dest", "UniqueCarrier")
+      features_names = columnsCheck.to[ArrayBuffer] -= "ArrDelay" -= "Origin" -= "Dest" -= "UniqueCarrier" +=
+                                                        "Origin_cat" += "Dest_cat" += "UniqueCarrier_cat"
+    else
+      features_names = columnsFinal.to[ArrayBuffer] -= "ArrDelay"
+
+    // Assemble features
     val assembler = new VectorAssembler()
       .setInputCols(features_names.toArray)
       .setOutputCol("features")
@@ -166,9 +196,9 @@ class SparkPredictor {
     var pipeline = new Pipeline()
       .setStages(Array(assembler, scaler))
 
-    val outFile = new File("output.txt")
-    val output = new PrintWriter(outFile)
     output.print("Execution summary:\n\n")
+
+    features_names += "ArrDelay"
 
     if (checking) {
       //      for (c <- df.columns)
@@ -181,10 +211,10 @@ class SparkPredictor {
         .setInputCol("UniqueCarrier")
         .setOutputCol("UniqueCarrier_cat")
       val assemblerArrDelay = new VectorAssembler()
-        .setInputCols((features_names ++ Set("ArrDelay")).toArray)
+        .setInputCols(features_names.toArray)
         .setOutputCol("featuresCorr")
       val scalerArrDelay = new StandardScaler()
-        .setInputCol("features")
+        .setInputCol("featuresCorr")
         .setOutputCol("scaledFeaturesCorr")
         .setWithStd(true).setWithMean(true)
       pipeline = new Pipeline()
@@ -216,12 +246,8 @@ class SparkPredictor {
     val upperRange = quantiles(1) + 1.5 * (quantiles(1) - quantiles(0))
     val dfTraining = dfMahalanobis.filter($"mahalanobis" < upperRange)
 
-    if (checking) {
-      // TODO: round values of column `pearson(scaledFeaturesCorr)` in dfCorr to have a better print
-      val dfCorr = Correlation.corr(dfTraining, "scaledFeaturesCorr")
-      val Row(coeff: Matrix) = dfCorr.head
-      output.println(s"\nPearson correlation matrix:\n  " + coeff.toString(16, 1000))
-    }
+    if (checking)
+      printCorrMatrix(dfTraining, features_names)
 
     val regressors = Array("linear", "decision tree")
     for (reg <- regressors) {
