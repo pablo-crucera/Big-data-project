@@ -12,7 +12,6 @@ import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 
-import java.io.{File, PrintWriter}
 import scala.collection.mutable.ArrayBuffer
 
 class SparkPredictor {
@@ -21,8 +20,8 @@ class SparkPredictor {
   import spark.implicits._
 
   var checking = false
-  var trainFiles = Array.empty[File]
-  var testFiles = Array.empty[File]
+  var trainFiles = Array.empty[String]
+  var testFiles = Array.empty[String]
   var testPercentage = 0.3
   val schema: StructType = StructType(Array(
     StructField("Year", IntegerType, nullable = true),
@@ -92,13 +91,11 @@ class SparkPredictor {
     if (testing)
       files = testFiles
 
-    // TODO: check files are correct
-
     // Transform variables with format hhmm to minutes after 00:00
     val parseTime: UserDefinedFunction = udf((s: Int) => s % 100 + (s / 100) * 60)
     val df = spark.read.option("header", "true")
       .schema(schema)
-      .csv(files.map(_.getAbsolutePath): _*)
+      .csv(files: _*)
       .select(checkCols.map(s => col(s)): _*)
       .withColumn("DepTime", parseTime($"DepTime"))
       .withColumn("CRSDepTime", parseTime($"CRSDepTime"))
@@ -108,9 +105,6 @@ class SparkPredictor {
     if (checking)
       return df.filter($"Origin" =!= "NA" && $"Dest" =!= "NA" && $"UniqueCarrier" =!= "NA")
     df.select(finalCols.map(s => col(s)): _*)
-
-    // TODO: transform times to the same time zone
-    // TODO: create new variables, like number of flights that get to the same airport at the same time
   }
 
   /**
@@ -147,7 +141,7 @@ class SparkPredictor {
   /**
    * Gets a string representation of the correlation matrix
    *
-   * @param df the DataFrame to calculate the correlation matrix from. It must have a column named `scaledFeaturesCorr`
+   * @param df        the DataFrame to calculate the correlation matrix from. It must have a column named `scaledFeaturesCorr`
    * @param colsNames names of the columns of the matrix
    */
   def getCorrMString(df: DataFrame, colsNames: ArrayBuffer[String]): String = {
@@ -165,21 +159,23 @@ class SparkPredictor {
   }
 
   /**
-   * Prints a summary of the execution performed in a file called `output.txt`
+   * Gets a summary of the execution performed
    *
    * @param resultsLinear Results for linear regression
-   * @param resultsTree Results for decision tree regression
-   * @param df the Dataframe to calculate the correlation matrix from
+   * @param resultsTree   Results for decision tree regression
+   * @param df            the Dataframe to calculate the correlation matrix from
    * @param featuresNames Names of the features in the correlation matrix
+   *
+   * @return a summary of the execution
    */
-  def printSummary(resultsLinear: (Double, Double, Double, String), resultsTree: (Double, Double, Double, String),
-                   df:DataFrame, featuresNames: ArrayBuffer[String]): Unit = {
-    val outFile = new File("output.txt")
-    val output = new PrintWriter(outFile)
+  def getSummary(resultsLinear: (Double, Double, Double, String), resultsTree: (Double, Double, Double, String),
+                   df: DataFrame, featuresNames: ArrayBuffer[String]): String = {
 
-    output.print("Execution summary:\n\n")
+
+    var summary = "Execution summary:\n\n"
+
     if (checking)
-      output.println(getCorrMString(df, featuresNames))
+      summary += getCorrMString(df, featuresNames)
 
     val text =
       """
@@ -192,17 +188,21 @@ class SparkPredictor {
         |%s
         |""".stripMargin
 
-    output.println(text.format("LINEAR", resultsLinear._1, resultsLinear._2, resultsLinear._3, resultsLinear._4))
-    output.println(text.format("DECISION TREE", resultsTree._1, resultsTree._2, resultsTree._3, resultsTree._4))
-    output.close()
+    summary += text.format("LINEAR", resultsLinear._1, resultsLinear._2, resultsLinear._3, resultsLinear._4)
+    summary += text.format("DECISION TREE", resultsTree._1, resultsTree._2, resultsTree._3, resultsTree._4)
+    summary
   }
 
   /**
    * Executes the predictor according to the values of the attributes
+   *
+   * @return  a summary of the execution
    */
-  def run(): Unit = {
-    // TODO: make a better use of pipelines
+  def run(): String = {
     val df = loadData(testing = false, checking = checking)
+
+    if(df.isEmpty)
+      return "ERROR: files provided do not satisfy the required format"
 
     var featuresNames = ArrayBuffer.empty[String]
     if (checking)
@@ -226,7 +226,7 @@ class SparkPredictor {
       .setStages(Array(assembler, scaler))
 
     featuresNames += "ArrDelay"
-    // Add more information if we are checking
+    // Add more information if we are checking the model with all the variables
     if (checking) {
       val indexerCity = new StringIndexer()
         .setInputCols(Array("Origin", "Dest"))
@@ -256,7 +256,9 @@ class SparkPredictor {
     if (testPercentage == 0)
       dfTest = pipelineModel.transform(loadData(testing = true, checking = checking))
 
-    // TODO: check the requirements for the input file in order to avoid PCA and correlation matrix throwing an exception
+    if (dfTest.isEmpty || training.isEmpty)
+      return "ERROR: files provided do not satisfy the required format"
+
     // Perform Principal Component Analysis and delete outliers from the training set
     val k = 3
     val dfPCA = new PCA()
@@ -274,6 +276,6 @@ class SparkPredictor {
     val resultsLinear = regressionModel("linear", dfTraining, dfTest)
     val resultsTree = regressionModel("decision tree", dfTraining, dfTest)
 
-    printSummary(resultsLinear, resultsTree, dfTraining, featuresNames)
+    getSummary(resultsLinear, resultsTree, dfTraining, featuresNames)
   }
 }

@@ -1,6 +1,6 @@
 package flights
 
-import java.io.File
+import java.io.{File, PrintWriter}
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
 
@@ -8,8 +8,8 @@ object FlightsDelayApp {
   /**
    * Shows a file chooser that allows the user to select multiple CSV files
    *
-   * @param s a string that tells the user has to select
-   * @return the option chosen in the dialog and and array with the paths to the files selected
+   * @param s a string that tells user what the files to be selected are for
+   * @return the option chosen in the dialog and and array with the files selected
    */
   def selectFiles(s: String): (Boolean, Array[File]) = {
     var filePaths = Array.empty[File]
@@ -76,7 +76,6 @@ object FlightsDelayApp {
       errorMessage(args)
       sys.exit(1)
     }
-    // TODO: add cross-validation and/or hyper-parameter tuning
 
     val argsList = args.toList
     val tupleArgs = parseArgs(argsList, check = false, 0.3)
@@ -102,9 +101,14 @@ object FlightsDelayApp {
     }
 
     if (tuple1._1 && tuple2._1 && !tuple1._2.isEmpty && (!tuple2._2.isEmpty || predictor.testPercentage != 0)) {
-      predictor.trainFiles = tuple1._2
-      predictor.testFiles = tuple2._2
-      predictor.run()
+      predictor.trainFiles = tuple1._2.map(f => f.getAbsolutePath)
+      predictor.testFiles = tuple2._2.map(f => f.getAbsolutePath)
+
+      val outFile = new File("output.txt")
+      val output = new PrintWriter(outFile)
+      val executionResult = predictor.run()
+      output.println(executionResult)
+      output.close()
     }
   }
 }
